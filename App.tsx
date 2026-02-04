@@ -1,8 +1,8 @@
-import React, { useState, useRef, ChangeEvent } from 'react';
+import React, { useState, useRef, ChangeEvent, useEffect } from 'react';
 import { Language, Subject, ExplanationResponse } from './types';
-import { getTeacherExplanation, getTeacherSpeech } from './services/geminiService';
+import { getTeacherExplanation, getTeacherSpeech, getTeacherDiagram } from './services/aiService';
 
-// Audio Utility Functions
+// Audio Decoding Utilities for Gemini raw PCM
 function decodeBase64(base64: string) {
   const binaryString = atob(base64);
   const len = binaryString.length;
@@ -19,7 +19,7 @@ async function decodeAudioData(
   sampleRate: number,
   numChannels: number,
 ): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data.buffer, data.byteOffset, data.byteLength / 2);
+  const dataInt16 = new Int16Array(data.buffer);
   const frameCount = dataInt16.length / numChannels;
   const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
 
@@ -35,45 +35,74 @@ async function decodeAudioData(
 const App: React.FC = () => {
   const [language, setLanguage] = useState<Language>('English');
   const [subject, setSubject] = useState<Subject>('Mathematics');
-  const [inputText, setInputText] = useState('');
+  const [inputText, setInputText] = useState<string>('');
   const [image, setImage] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [audioLoading, setAudioLoading] = useState(false);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [diagram, setDiagram] = useState<string | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [audioLoading, setAudioLoading] = useState<boolean>(false);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [result, setResult] = useState<ExplanationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const [isCameraOpen, setIsCameraOpen] = useState<boolean>(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   const handleImageChange = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
-      reader.onloadend = () => {
-        setImage(reader.result as string);
-      };
+      reader.onloadend = () => setImage(reader.result as string);
       reader.readAsDataURL(file);
     }
   };
 
+  const startCamera = async () => {
+    setError(null);
+    setIsCameraOpen(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      if (videoRef.current) videoRef.current.srcObject = stream;
+    } catch (err) {
+      setError("Please allow camera access beta.");
+      setIsCameraOpen(false);
+    }
+  };
+
+  const stopCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+    }
+    setIsCameraOpen(false);
+  };
+
+  const capturePhoto = () => {
+    if (videoRef.current && canvasRef.current) {
+      const canvas = canvasRef.current;
+      canvas.width = videoRef.current.videoWidth;
+      canvas.height = videoRef.current.videoHeight;
+      canvas.getContext('2d')?.drawImage(videoRef.current, 0, 0);
+      setImage(canvas.toDataURL('image/jpeg'));
+      stopCamera();
+    }
+  };
+
   const stopTeacherSpeech = () => {
-    if (currentSourceRef.current) {
-      try {
-        currentSourceRef.current.stop();
-      } catch (e) {
-        // Audio already stopped
-      }
-      currentSourceRef.current = null;
+    if (audioSourceRef.current) {
+      audioSourceRef.current.stop();
+      audioSourceRef.current = null;
     }
     setIsPlaying(false);
-    setAudioLoading(false);
   };
 
   const handleAsk = async () => {
-    if (!inputText.trim() && !image) {
-      setError("Please type a question or upload a photo of your book, beta.");
+    const trimmedInput = inputText.trim();
+    if (!trimmedInput && !image) {
+      setError("Please type something or take a photo, beta.");
       return;
     }
 
@@ -81,13 +110,22 @@ const App: React.FC = () => {
     setLoading(true);
     setError(null);
     setResult(null);
+    setDiagram(null);
 
     try {
-      const currentImage: string | null = image;
-      const response = await getTeacherExplanation(language, subject, inputText, currentImage);
+      const response = await getTeacherExplanation(language, subject, trimmedInput, image);
       setResult(response);
-    } catch (err) {
-      setError("Oh ho! Something went wrong. Let's try again, okay?");
+      
+      // Also generate a diagram based on the topic
+      try {
+        const diagramImg = await getTeacherDiagram(response.writtenStyle.topicName);
+        setDiagram(diagramImg);
+      } catch (diagErr) {
+        console.warn("Diagram generation skipped:", diagErr);
+      }
+      
+    } catch (err: any) {
+      setError("Oh ho! Gemini API is busy. Let's try once more!");
       console.error(err);
     } finally {
       setLoading(false);
@@ -95,55 +133,44 @@ const App: React.FC = () => {
   };
 
   const playTeacherFullNarration = async () => {
-    if (!result || audioLoading || isPlaying) return;
+    if (!result || isPlaying) return;
     
     setAudioLoading(true);
-    setError(null);
-    
     try {
-      const intro = result.spokenStyle;
-      const topic = `The topic for today is ${result.writtenStyle.topicName}.`;
-      const meaning = `It means: ${result.writtenStyle.simpleMeaning}.`;
-      const stepsHeader = `Let's break it down into steps.`;
-      const steps = result.writtenStyle.stepByStep.join(". ");
-      const example = `Here is an easy example: ${result.writtenStyle.easyExample}.`;
-      const summary = `To sum it up: ${result.writtenStyle.shortSummary}`;
-
-      const fullText = `${intro} ${topic} ${meaning} ${stepsHeader} ${steps} ${example} ${summary}`;
-      const cleanText = fullText.replace(/\s+/g, ' ').trim();
-
-      const base64Audio = await getTeacherSpeech(cleanText);
+      const { spokenStyle, writtenStyle } = result;
+      // "Pura padhe": Full sequence of content
+      const fullContentToRead = `
+        ${spokenStyle}. 
+        Today we are learning about ${writtenStyle.topicName}. 
+        In simple words, ${writtenStyle.simpleMeaning}. 
+        Let me tell you the steps. ${writtenStyle.stepByStep.join(". ")}. 
+        For example, ${writtenStyle.easyExample}. 
+        To summarize: ${writtenStyle.shortSummary}.
+      `;
+      
+      const base64Audio = await getTeacherSpeech(fullContentToRead);
       
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       }
       
       const ctx = audioContextRef.current;
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
-      }
-
       const bytes = decodeBase64(base64Audio);
       const audioBuffer = await decodeAudioData(bytes, ctx, 24000, 1);
 
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
-      source.onended = () => {
-        setIsPlaying(false);
-        setAudioLoading(false);
-        currentSourceRef.current = null;
-      };
+      source.onended = () => setIsPlaying(false);
       
-      currentSourceRef.current = source;
+      audioSourceRef.current = source;
       source.start();
       setIsPlaying(true);
+    } catch (err) {
+      console.error(err);
+      setError("Teacher's voice is tired. Please try again later!");
+    } finally {
       setAudioLoading(false);
-    } catch (err: any) {
-      console.error("Narration Playback error:", err);
-      setError("Teacher's voice is having some trouble beta. Please try again!");
-      setAudioLoading(false);
-      setIsPlaying(false);
     }
   };
 
@@ -159,22 +186,19 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-orange-50/30 font-sans pb-12">
-      <header className="bg-gradient-to-r from-indigo-600 via-blue-600 to-indigo-700 p-6 text-white shadow-lg sticky top-0 z-50">
+      <header className="bg-gradient-to-r from-indigo-600 to-blue-700 p-6 text-white shadow-lg sticky top-0 z-50">
         <div className="max-w-4xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-indigo-600 shadow-md">
               <i className="fas fa-chalkboard-teacher text-2xl"></i>
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight">My Teacher app</h1>
-              <p className="text-indigo-100 text-sm">Learning is fun with Didi!</p>
+              <h1 className="text-2xl font-bold tracking-tight">Class 5 Guru</h1>
+              <p className="text-indigo-100 text-sm">Learning is Fun with Didi!</p>
             </div>
           </div>
-          
           <div className="student-badge px-5 py-2 rounded-2xl flex items-center gap-3 border border-white/30">
-            <div className="w-10 h-10 bg-yellow-400 rounded-full flex items-center justify-center text-indigo-900 font-bold border-2 border-white shadow-sm">
-              AY
-            </div>
+            <div className="w-10 h-10 bg-yellow-400 rounded-full flex items-center justify-center text-indigo-900 font-bold border-2 border-white shadow-sm">AY</div>
             <div className="text-left">
               <p className="font-bold text-sm leading-none">Astha Yadav</p>
               <p className="text-xs text-indigo-100 mt-1">Class - 5</p>
@@ -184,218 +208,140 @@ const App: React.FC = () => {
       </header>
 
       <main className="max-w-3xl mx-auto mt-8 px-4 space-y-8">
-        <div className="bg-white rounded-[2.5rem] shadow-xl overflow-hidden border border-gray-100">
-          <div className="p-6 md:p-10 space-y-8">
-            <section className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              <div className="space-y-4">
-                <label className="flex items-center gap-2 text-sm font-bold text-gray-700">
-                  <i className="fas fa-language text-indigo-500"></i>
-                  Preferred Language
-                </label>
-                <div className="flex p-1 bg-gray-100 rounded-2xl">
-                  {(['English', 'Hindi'] as Language[]).map((lang) => (
-                    <button
-                      key={lang}
-                      onClick={() => setLanguage(lang)}
-                      className={`flex-1 py-3 px-4 rounded-xl font-bold transition-all ${
-                        language === lang 
-                          ? 'bg-white text-indigo-600 shadow-md transform scale-[1.02]' 
-                          : 'text-gray-500 hover:text-gray-700'
-                      }`}
-                    >
-                      {lang}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                <label className="flex items-center gap-2 text-sm font-bold text-gray-700">
-                  <i className="fas fa-book text-orange-500"></i>
-                  Select Subject
-                </label>
-                <div className="relative">
-                  <select
-                    value={subject}
-                    onChange={(e) => setSubject(e.target.value as Subject)}
-                    className="w-full py-3.5 px-4 bg-gray-100 border-none rounded-2xl font-bold text-gray-700 focus:ring-2 focus:ring-indigo-400 outline-none appearance-none cursor-pointer"
-                  >
-                    {subjects.map((s) => (
-                      <option key={s.name} value={s.name}>{s.name}</option>
-                    ))}
-                  </select>
-                  <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400">
-                    <i className="fas fa-chevron-down"></i>
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <section className="space-y-4">
-              <label className="flex items-center gap-2 text-sm font-bold text-gray-700">
-                <i className="fas fa-pencil-alt text-purple-500"></i>
-                Ask me a question from your book
+        <div className="bg-white rounded-[2.5rem] shadow-xl p-6 md:p-10 border border-gray-100">
+          <section className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+            <div className="space-y-4">
+              <label className="text-sm font-bold text-gray-700 flex items-center gap-2">
+                <i className="fas fa-language text-indigo-500"></i> Language
               </label>
-              <div className="relative group">
-                <textarea
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  placeholder="Ex: What is a noun? or Paste a math question..."
-                  className="w-full h-40 p-6 rounded-[2rem] border-2 border-gray-100 bg-gray-50/50 focus:bg-white focus:border-indigo-400 focus:ring-0 transition-all text-lg resize-none shadow-inner"
-                />
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-4">
-                <div className="flex-1">
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={handleImageChange}
-                    ref={fileInputRef}
-                    className="hidden"
-                  />
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="w-full h-full py-4 px-6 rounded-2xl border-2 border-dashed border-gray-300 text-gray-500 hover:border-indigo-400 hover:text-indigo-600 transition-all flex items-center justify-center gap-3 font-bold bg-white"
-                  >
-                    <i className="fas fa-camera-retro text-2xl"></i>
-                    {image ? 'Change Photo' : 'Upload Book Photo'}
+              <div className="flex p-1 bg-gray-100 rounded-2xl">
+                {(['English', 'Hindi'] as Language[]).map((lang) => (
+                  <button key={lang} onClick={() => setLanguage(lang)} className={`flex-1 py-2 px-4 rounded-xl font-bold transition-all ${language === lang ? 'bg-white text-indigo-600 shadow-md transform scale-[1.02]' : 'text-gray-500 hover:text-gray-700'}`}>
+                    {lang}
                   </button>
-                </div>
-                <button
-                  onClick={handleAsk}
-                  disabled={loading}
-                  className="flex-[1.5] py-4 px-8 rounded-2xl bg-indigo-600 text-white font-bold text-xl shadow-lg hover:bg-indigo-700 disabled:bg-gray-300 transition-all active:scale-95 transform flex items-center justify-center gap-3"
-                >
-                  {loading ? (
-                    <>
-                      <i className="fas fa-brain fa-spin"></i>
-                      <span>Thinking...</span>
-                    </>
-                  ) : (
-                    <>
-                      <i className="fas fa-sparkles"></i>
-                      <span>Ask Didi ✨</span>
-                    </>
-                  )}
-                </button>
+                ))}
               </div>
+            </div>
+            <div className="space-y-4">
+              <label className="text-sm font-bold text-gray-700 flex items-center gap-2">
+                <i className="fas fa-book text-orange-500"></i> Subject
+              </label>
+              <select value={subject} onChange={(e) => setSubject(e.target.value as Subject)} className="w-full py-3 px-4 bg-gray-100 border-none rounded-2xl font-bold text-gray-700 outline-none cursor-pointer hover:bg-gray-200 transition-colors">
+                {subjects.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}
+              </select>
+            </div>
+          </section>
 
-              {image && (
-                <div className="inline-block relative p-2 bg-white rounded-2xl shadow-md border-2 border-indigo-100 animate-in zoom-in duration-300">
-                  <img src={image} alt="Preview" className="w-24 h-24 object-cover rounded-xl" />
-                  <button 
-                    onClick={() => setImage(null)}
-                    className="absolute -top-3 -right-3 bg-red-500 text-white w-8 h-8 rounded-full flex items-center justify-center shadow-lg hover:bg-red-600 transition-colors"
-                  >
-                    <i className="fas fa-times"></i>
-                  </button>
-                </div>
-              )}
-            </section>
-          </div>
+          <section className="space-y-4">
+            <label className="text-sm font-bold text-gray-700 flex items-center gap-2">
+              <i className="fas fa-pencil-alt text-purple-500"></i> Your Question
+            </label>
+            <textarea value={inputText} onChange={(e) => setInputText(e.target.value)} placeholder="Type here or take a photo of your book..." className="w-full h-32 p-6 rounded-[2rem] bg-gray-50 border-2 border-gray-100 focus:border-indigo-400 outline-none transition-all text-lg resize-none shadow-inner" />
+            
+            <div className="flex flex-wrap gap-4">
+              <button onClick={startCamera} className="flex-1 py-4 px-6 rounded-2xl bg-white border-2 border-indigo-100 text-indigo-600 font-bold flex items-center justify-center gap-3 shadow-sm hover:bg-indigo-50 active:scale-95 transition-transform">
+                <i className="fas fa-camera"></i> Take Photo
+              </button>
+              <button onClick={() => fileInputRef.current?.click()} className="flex-1 py-4 px-6 rounded-2xl bg-white border-2 border-indigo-100 text-indigo-600 font-bold flex items-center justify-center gap-3 shadow-sm hover:bg-indigo-50 active:scale-95 transition-transform">
+                <i className="fas fa-image"></i> Gallery
+              </button>
+              <input type="file" accept="image/*" onChange={handleImageChange} ref={fileInputRef} className="hidden" />
+              
+              <button onClick={handleAsk} disabled={loading} className="w-full py-4 px-8 rounded-2xl bg-indigo-600 text-white font-bold text-xl shadow-lg hover:bg-indigo-700 disabled:bg-gray-300 flex items-center justify-center gap-3 active:scale-[0.98] transition-all">
+                {loading ? <><i className="fas fa-brain fa-spin"></i> Didi is thinking...</> : <><i className="fas fa-sparkles"></i> Ask Didi ✨</>}
+              </button>
+            </div>
+
+            {image && !isCameraOpen && (
+              <div className="inline-block relative p-2 bg-white rounded-2xl shadow-md border-2 border-indigo-100 animate-in mt-4">
+                <img src={image} alt="Preview" className="w-32 h-32 object-cover rounded-xl" />
+                <button onClick={() => setImage(null)} className="absolute -top-3 -right-3 bg-red-500 text-white w-8 h-8 rounded-full shadow-md flex items-center justify-center"><i className="fas fa-times"></i></button>
+              </div>
+            )}
+          </section>
         </div>
 
-        {error && (
-          <div className="p-4 bg-red-50 text-red-600 rounded-2xl flex items-center gap-3 border border-red-100 animate-in slide-in-from-top duration-300">
-            <i className="fas fa-exclamation-triangle text-xl"></i>
-            <p className="font-bold">{error}</p>
+        {isCameraOpen && (
+          <div className="fixed inset-0 z-[100] bg-black flex flex-col items-center justify-center p-4">
+            <div className="relative w-full max-w-lg aspect-[3/4] video-container shadow-2xl overflow-hidden bg-gray-900">
+              <video ref={videoRef} autoPlay playsInline muted />
+              <div className="absolute bottom-8 left-0 right-0 flex justify-center gap-8 px-4">
+                <button onClick={stopCamera} className="w-16 h-16 bg-white/20 backdrop-blur-md rounded-full text-white text-2xl border border-white/30"><i className="fas fa-times"></i></button>
+                <button onClick={capturePhoto} className="w-20 h-20 bg-white rounded-full text-indigo-600 text-3xl shadow-xl border-4 border-white active:scale-90 transition-transform"><i className="fas fa-camera"></i></button>
+              </div>
+            </div>
+            <canvas ref={canvasRef} className="hidden" />
           </div>
         )}
 
+        {error && <div className="p-4 bg-red-50 text-red-600 rounded-2xl flex items-center gap-3 border border-red-100 animate-in shadow-sm"><i className="fas fa-exclamation-triangle"></i><p className="font-bold">{error}</p></div>}
+
         {result && (
-          <div className="space-y-8 animate-in fade-in slide-in-from-bottom-8 duration-700 fill-mode-both">
+          <div className="space-y-8 animate-in pb-20">
             <div className="bg-indigo-50 rounded-[2.5rem] p-6 md:p-10 border border-indigo-100 shadow-xl relative overflow-hidden">
-              <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
-                <i className="fas fa-quote-right text-8xl text-indigo-600"></i>
+              <div className="flex flex-wrap items-center justify-between gap-4 mb-6 relative z-10">
+                <div className="flex items-center gap-4">
+                  <div className="text-4xl filter drop-shadow-sm">👩‍🏫</div>
+                  <div>
+                    <h3 className="font-bold text-indigo-900 text-2xl">{result.writtenStyle.topicName}</h3>
+                    <p className="text-indigo-600 font-bold text-xs uppercase tracking-wider">Class 5 • {subject}</p>
+                  </div>
+                </div>
+                <button onClick={isPlaying ? stopTeacherSpeech : playTeacherFullNarration} disabled={audioLoading} className={`flex items-center gap-2 py-3 px-6 rounded-2xl font-bold shadow-md transition-all active:scale-95 ${isPlaying ? 'bg-red-500 text-white animate-pulse' : 'bg-green-500 text-white hover:bg-green-600'} disabled:opacity-50`}>
+                  <i className={`fas ${audioLoading ? 'fa-spinner fa-spin' : isPlaying ? 'fa-stop-circle' : 'fa-volume-up'}`}></i>
+                  {audioLoading ? 'Didi is reading...' : isPlaying ? 'Stop' : 'Listen to Full Lesson'}
+                </button>
               </div>
-              
-              <div className="relative z-10 space-y-6">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div className="flex items-center gap-4">
-                    <div className="w-16 h-16 bg-white rounded-3xl flex items-center justify-center text-4xl shadow-md border border-indigo-100">
-                      👩‍🏫
-                    </div>
-                    <div>
-                      <h3 className="font-bold text-indigo-900 text-2xl">{result.writtenStyle.topicName}</h3>
-                      <p className="text-indigo-600 font-bold px-3 py-1 bg-white rounded-full inline-block text-xs mt-1 uppercase tracking-wider">
-                        Subject: {subject}
-                      </p>
-                    </div>
+
+              <div className="p-6 bg-white rounded-[2rem] shadow-sm italic text-lg text-indigo-800 border border-indigo-50 mb-8 leading-relaxed border-l-4 border-l-indigo-400">
+                "{result.spokenStyle}"
+              </div>
+
+              <div className="grid gap-6 relative z-10">
+                {/* Generated Diagram Section */}
+                {diagram && (
+                  <div className="bg-white rounded-3xl p-4 shadow-sm border border-indigo-100 overflow-hidden">
+                    <h4 className="font-bold text-indigo-900 mb-3 flex items-center gap-2">
+                      <i className="fas fa-pencil-ruler text-indigo-500"></i> Visual Diagram
+                    </h4>
+                    <img src={diagram} alt="Lesson Diagram" className="w-full rounded-2xl border border-gray-100 shadow-inner" />
+                    <p className="text-xs text-gray-400 mt-2 text-center italic">Drawing made by Didi to help you understand!</p>
                   </div>
-                  
-                  <div className="flex gap-2">
-                    {isPlaying ? (
-                      <button
-                        onClick={stopTeacherSpeech}
-                        className="flex items-center gap-2 py-3 px-6 rounded-2xl font-bold shadow-md transition-all bg-red-500 text-white hover:bg-red-600 active:scale-95"
-                      >
-                        <i className="fas fa-stop-circle"></i>
-                        Stop Didi
-                      </button>
-                    ) : (
-                      <button
-                        onClick={playTeacherFullNarration}
-                        disabled={audioLoading}
-                        className={`flex items-center gap-2 py-3 px-6 rounded-2xl font-bold shadow-md transition-all ${
-                          audioLoading 
-                            ? 'bg-gray-200 text-gray-500 cursor-not-allowed' 
-                            : 'bg-green-500 text-white hover:bg-green-600 active:scale-95'
-                        }`}
-                      >
-                        <i className={`fas ${audioLoading ? 'fa-spinner fa-spin' : 'fa-volume-up'}`}></i>
-                        {audioLoading ? 'Voice Loading...' : 'Listen to Didi'}
-                      </button>
-                    )}
+                )}
+
+                <div className="bg-white/60 p-6 rounded-3xl border border-white/40 shadow-sm transition-all hover:bg-white/80">
+                  <h4 className="font-bold text-gray-900 mb-2 flex items-center gap-2">
+                    <i className="fas fa-info-circle text-blue-500"></i> What does it mean?
+                  </h4>
+                  <p className="text-lg text-gray-700 leading-relaxed">{result.writtenStyle.simpleMeaning}</p>
+                </div>
+
+                <div className="bg-white/60 p-6 rounded-3xl border border-white/40 shadow-sm transition-all hover:bg-white/80">
+                  <h4 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                    <i className="fas fa-list-ol text-green-500"></i> Steps to remember:
+                  </h4>
+                  <div className="space-y-4">
+                    {result.writtenStyle.stepByStep.map((s, i) => (
+                      <div key={i} className="flex gap-4 group">
+                        <span className="bg-indigo-600 text-white w-7 h-7 rounded-lg flex items-center justify-center text-sm font-bold mt-1 flex-shrink-0 shadow-sm group-hover:scale-110 transition-transform">{i+1}</span>
+                        <span className="text-gray-700 text-lg leading-snug">{s}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
 
-                <div className="p-6 bg-white rounded-[2rem] shadow-sm border border-indigo-50 leading-relaxed italic text-lg text-indigo-800">
-                  "{result.spokenStyle}"
-                </div>
-
-                <div className="grid gap-8 mt-8">
-                  <div className="bg-white/60 p-6 rounded-3xl border border-white/50">
-                    <h4 className="font-bold text-gray-900 mb-3 flex items-center gap-2 text-lg">
-                      <i className="fas fa-info-circle text-blue-500"></i>
-                      What does it mean?
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="p-6 bg-yellow-50 rounded-3xl border border-yellow-100 shadow-sm transition-all hover:shadow-md">
+                    <h4 className="font-bold text-yellow-800 mb-2 flex items-center gap-2">
+                      <i className="fas fa-lightbulb"></i> Daily Example:
                     </h4>
-                    <p className="text-lg leading-relaxed text-gray-700">{result.writtenStyle.simpleMeaning}</p>
+                    <p className="text-yellow-900 font-medium leading-relaxed">{result.writtenStyle.easyExample}</p>
                   </div>
-
-                  <div className="bg-white/60 p-6 rounded-3xl border border-white/50">
-                    <h4 className="font-bold text-gray-900 mb-4 flex items-center gap-2 text-lg">
-                      <i className="fas fa-list-check text-indigo-500"></i>
-                      Step-by-step:
+                  <div className="p-6 bg-green-50 rounded-3xl border border-green-100 shadow-sm transition-all hover:shadow-md">
+                    <h4 className="font-bold text-green-800 mb-2 flex items-center gap-2">
+                      <i className="fas fa-check-circle"></i> In short:
                     </h4>
-                    <div className="space-y-4">
-                      {result.writtenStyle.stepByStep.map((step, idx) => (
-                        <div key={idx} className="flex gap-4 items-start">
-                          <span className="flex-shrink-0 w-8 h-8 bg-indigo-600 text-white rounded-xl flex items-center justify-center text-sm font-bold shadow-sm">
-                            {idx + 1}
-                          </span>
-                          <span className="text-gray-700 text-lg leading-snug pt-1">{step}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="p-6 bg-yellow-50 rounded-3xl border border-yellow-100 shadow-sm">
-                      <h4 className="font-bold text-yellow-800 mb-2 flex items-center gap-2 text-lg">
-                        <i className="fas fa-lightbulb text-yellow-500"></i>
-                        Easy Example
-                      </h4>
-                      <p className="text-yellow-900 text-lg font-medium">{result.writtenStyle.easyExample}</p>
-                    </div>
-
-                    <div className="p-6 bg-green-50 rounded-3xl border border-green-100 shadow-sm">
-                      <h4 className="font-bold text-green-800 mb-2 flex items-center gap-2 text-lg">
-                        <i className="fas fa-check-double text-green-500"></i>
-                        Remember this!
-                      </h4>
-                      <p className="text-green-900 text-lg">{result.writtenStyle.shortSummary}</p>
-                    </div>
+                    <p className="text-green-900 leading-relaxed">{result.writtenStyle.shortSummary}</p>
                   </div>
                 </div>
               </div>
@@ -403,30 +349,15 @@ const App: React.FC = () => {
             
             <div className="text-center pb-8">
               <button 
-                onClick={() => {
-                  stopTeacherSpeech();
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
-                  setInputText('');
-                  setImage(null);
-                  setResult(null);
-                }}
-                className="py-4 px-10 bg-white border-2 border-indigo-100 text-indigo-600 font-bold rounded-2xl hover:bg-indigo-50 transition-all shadow-md inline-flex items-center gap-3"
+                onClick={() => { window.scrollTo({ top: 0, behavior: 'smooth' }); setResult(null); setImage(null); setDiagram(null); setInputText(''); }}
+                className="py-4 px-10 bg-white border-2 border-indigo-100 text-indigo-600 font-bold rounded-2xl hover:bg-indigo-50 transition-all shadow-md inline-flex items-center gap-2 active:scale-95"
               >
-                <i className="fas fa-plus-circle"></i>
-                Teach me more, Didi!
+                <i className="fas fa-redo"></i> Teach me another topic, Didi!
               </button>
             </div>
           </div>
         )}
       </main>
-
-      <footer className="max-w-4xl mx-auto px-4 text-center">
-        <div className="pt-8 border-t border-gray-200">
-          <p className="text-gray-400 font-bold text-sm tracking-wide uppercase">
-            My Teacher app • Made for Astha Yadav 💖
-          </p>
-        </div>
-      </footer>
     </div>
   );
 };
