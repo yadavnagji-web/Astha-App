@@ -64,7 +64,7 @@ const App: React.FC = () => {
       try {
         currentSourceRef.current.stop();
       } catch (e) {
-        console.warn("Audio already stopped");
+        // Audio already stopped
       }
       currentSourceRef.current = null;
     }
@@ -73,7 +73,7 @@ const App: React.FC = () => {
   };
 
   const handleAsk = async () => {
-    if (!inputText && !image) {
+    if (!inputText.trim() && !image) {
       setError("Please type a question or upload a photo of your book, beta.");
       return;
     }
@@ -84,7 +84,7 @@ const App: React.FC = () => {
     setResult(null);
 
     try {
-      const response = await getTeacherExplanation(language, subject, inputText, image || undefined);
+      const response = await getTeacherExplanation(language, subject, inputText, image);
       setResult(response);
     } catch (err) {
       setError("Oh ho! Something went wrong. Let's try again, okay?");
@@ -141,20 +141,20 @@ const App: React.FC = () => {
       setAudioLoading(false);
     } catch (err: any) {
       console.error("Narration Playback error:", err);
-      setError(err.message || "Teacher's voice is having some trouble beta. Please try again!");
+      setError("Teacher's voice is having some trouble beta. Please try again!");
       setAudioLoading(false);
       setIsPlaying(false);
     }
   };
 
-  const subjects: { name: Subject; icon: string; color: string }[] = [
-    { name: 'Mathematics', icon: 'fa-calculator', color: 'bg-orange-100 text-orange-600' },
-    { name: 'Science', icon: 'fa-flask', color: 'bg-blue-100 text-blue-600' },
-    { name: 'Hindi', icon: 'fa-language', color: 'bg-red-100 text-red-600' },
-    { name: 'English', icon: 'fa-book', color: 'bg-purple-100 text-purple-600' },
-    { name: 'Social Science', icon: 'fa-globe', color: 'bg-green-100 text-green-600' },
-    { name: 'Computer', icon: 'fa-laptop', color: 'bg-indigo-100 text-indigo-600' },
-    { name: 'General Knowledge', icon: 'fa-lightbulb', color: 'bg-yellow-100 text-yellow-600' },
+  const subjects: { name: Subject; icon: string }[] = [
+    { name: 'Mathematics', icon: 'fa-calculator' },
+    { name: 'Science', icon: 'fa-flask' },
+    { name: 'Hindi', icon: 'fa-language' },
+    { name: 'English', icon: 'fa-book' },
+    { name: 'Social Science', icon: 'fa-globe' },
+    { name: 'Computer', icon: 'fa-laptop' },
+    { name: 'General Knowledge', icon: 'fa-lightbulb' },
   ];
 
   return (

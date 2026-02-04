@@ -1,15 +1,14 @@
 
 import { GoogleGenAI, Type, Modality } from "@google/genai";
-import { Language, Subject } from "../types";
+import { Language, Subject, ExplanationResponse } from "../types";
 
 export const getTeacherExplanation = async (
   language: Language,
   subject: Subject,
   text: string,
-  imageBuffer?: string // Base64
-) => {
-  // Fix: Use process.env.API_KEY directly as per guidelines
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  imageBuffer: string | null = null
+): Promise<ExplanationResponse> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || "" });
   const model = "gemini-3-flash-preview";
 
   const systemInstruction = `
@@ -38,11 +37,19 @@ export const getTeacherExplanation = async (
   `;
 
   const parts: any[] = [{ text: `Topic/Homework: ${text || "Please explain the content in the image"}` }];
-  if (imageBuffer) {
+  
+  if (imageBuffer && imageBuffer.includes(',')) {
     parts.push({
       inlineData: {
         mimeType: "image/jpeg",
-        data: imageBuffer.split(',')[1] || imageBuffer
+        data: imageBuffer.split(',')[1]
+      }
+    });
+  } else if (imageBuffer) {
+    parts.push({
+      inlineData: {
+        mimeType: "image/jpeg",
+        data: imageBuffer
       }
     });
   }
@@ -78,17 +85,16 @@ export const getTeacherExplanation = async (
       }
     });
 
-    // Fix: response.text is a property, not a method
-    return JSON.parse(response.text || "{}");
+    const resultText = response.text || "{}";
+    return JSON.parse(resultText) as ExplanationResponse;
   } catch (error) {
     console.error("Gemini Error:", error);
     throw error;
   }
 };
 
-export const getTeacherSpeech = async (text: string) => {
-  // Fix: Use process.env.API_KEY directly as per guidelines
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+export const getTeacherSpeech = async (text: string): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || "" });
   try {
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
@@ -97,21 +103,16 @@ export const getTeacherSpeech = async (text: string) => {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
           voiceConfig: {
-            // Using a warm, friendly voice
             prebuiltVoiceConfig: { voiceName: 'Kore' },
           },
         },
       },
     });
 
-    if (!response.candidates?.[0]?.content?.parts) {
-       throw new Error("The teacher couldn't speak right now. No response received.");
-    }
-
-    const audioPart = response.candidates[0].content.parts.find(p => p.inlineData && p.inlineData.data);
+    const audioPart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData && p.inlineData.data);
     
     if (!audioPart || !audioPart.inlineData) {
-       throw new Error("Audio data was missing from the teacher's response.");
+       throw new Error("The teacher's voice is busy right now beta. Try again!");
     }
 
     return audioPart.inlineData.data;
