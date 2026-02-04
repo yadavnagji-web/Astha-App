@@ -83,7 +83,6 @@ const App: React.FC = () => {
     setResult(null);
 
     try {
-      // Ensure image is exactly string | null
       const currentImage: string | null = image;
       const response = await getTeacherExplanation(language, subject, inputText, currentImage);
       setResult(response);
