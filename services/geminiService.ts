@@ -1,4 +1,3 @@
-
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { Language, Subject, ExplanationResponse } from "../types";
 
@@ -8,7 +7,8 @@ export const getTeacherExplanation = async (
   text: string,
   imageBuffer: string | null = null
 ): Promise<ExplanationResponse> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || "" });
+  const apiKey = process.env.API_KEY || "";
+  const ai = new GoogleGenAI({ apiKey });
   const model = "gemini-3-flash-preview";
 
   const systemInstruction = `
@@ -38,18 +38,12 @@ export const getTeacherExplanation = async (
 
   const parts: any[] = [{ text: `Topic/Homework: ${text || "Please explain the content in the image"}` }];
   
-  if (imageBuffer && imageBuffer.includes(',')) {
+  if (imageBuffer) {
+    const data = imageBuffer.includes(',') ? imageBuffer.split(',')[1] : imageBuffer;
     parts.push({
       inlineData: {
         mimeType: "image/jpeg",
-        data: imageBuffer.split(',')[1]
-      }
-    });
-  } else if (imageBuffer) {
-    parts.push({
-      inlineData: {
-        mimeType: "image/jpeg",
-        data: imageBuffer
+        data: data
       }
     });
   }
@@ -94,7 +88,8 @@ export const getTeacherExplanation = async (
 };
 
 export const getTeacherSpeech = async (text: string): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || "" });
+  const apiKey = process.env.API_KEY || "";
+  const ai = new GoogleGenAI({ apiKey });
   try {
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",

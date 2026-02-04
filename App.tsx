@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, ChangeEvent } from 'react';
 import { Language, Subject, ExplanationResponse } from './types';
 import { getTeacherExplanation, getTeacherSpeech } from './services/geminiService';
@@ -84,7 +83,9 @@ const App: React.FC = () => {
     setResult(null);
 
     try {
-      const response = await getTeacherExplanation(language, subject, inputText, image);
+      // Ensure image is exactly string | null
+      const currentImage: string | null = image;
+      const response = await getTeacherExplanation(language, subject, inputText, currentImage);
       setResult(response);
     } catch (err) {
       setError("Oh ho! Something went wrong. Let's try again, okay?");
