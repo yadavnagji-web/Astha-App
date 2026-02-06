@@ -1,116 +1,84 @@
-import { GoogleGenAI, Type, Modality } from "@google/genai";
-import { Language, Subject, ExplanationResponse } from "../types";
 
-const getAI = () => new GoogleGenAI({ apiKey: process.env.API_KEY || "" });
+import { GoogleGenAI } from "@google/genai";
+import { BackgroundType, Season, ImageFormat, TransformationType, Ornament } from "../types";
 
-export const getTeacherExplanation = async (
-  language: Language,
-  subject: Subject,
-  text: string,
-  imageBuffer: string | null = null
-): Promise<ExplanationResponse> => {
+// Explicit initialization using process.env.API_KEY as per mandatory requirements
+const getAI = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+export interface AIResponse<T> {
+  data: T;
+  usage?: {
+    totalTokenCount: number;
+    promptTokenCount: number;
+    candidatesTokenCount: number;
+  };
+}
+
+export const getArtTransformation = async (
+  imageBuffers: string[], 
+  transformationType: TransformationType,
+  background: BackgroundType = 'Spiral Notebook',
+  season: Season = 'None',
+  format: ImageFormat = 'Standard',
+  ornaments: Ornament[] = []
+): Promise<AIResponse<string>> => {
   const ai = getAI();
-  const systemInstruction = `
-    You are a caring and expert Indian school teacher (Didi or Masterji) for Class 5 students (Age 9-11).
-    Your goal is to explain educational topics in a very simple, friendly way using Indian daily life examples.
-    
-    Current Subject: ${subject}
-    Preferred Language: ${language}
-    
-    Role Guidelines:
-    1. Language: Explain in ${language}. If Hindi, use simple Hindi words kids understand.
-    2. Context: Use examples from Indian homes, schools, or villages.
-    3. Tone: Polite, encouraging, and patient.
-    
-    Output strictly in JSON format only.
-  `;
-
-  const parts: any[] = [{ text: `Topic/Question: ${text || "Please explain what is in the image"}` }];
-  
-  if (imageBuffer) {
-    const base64Data = imageBuffer.split(',')[1];
-    parts.push({
-      inlineData: {
-        mimeType: "image/jpeg",
-        data: base64Data
-      }
-    });
-  }
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: [{ parts }],
-    config: {
-      systemInstruction,
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          spokenStyle: { type: Type.STRING, description: "A conversational greeting and explanation." },
-          writtenStyle: {
-            type: Type.OBJECT,
-            properties: {
-              topicName: { type: Type.STRING },
-              simpleMeaning: { type: Type.STRING },
-              stepByStep: { type: Type.ARRAY, items: { type: Type.STRING } },
-              easyExample: { type: Type.STRING },
-              shortSummary: { type: Type.STRING }
-            },
-            required: ["topicName", "simpleMeaning", "stepByStep", "easyExample", "shortSummary"]
-          }
-        },
-        required: ["spokenStyle", "writtenStyle"]
-      }
+  const imageParts = imageBuffers.map(buffer => ({
+    inlineData: {
+      mimeType: "image/jpeg",
+      data: buffer.split(',')[1]
     }
-  });
+  }));
+  
+  const formatMap: Record<ImageFormat, string> = {
+    'Standard': '3:4',
+    'WhatsApp DP': '1:1',
+    'WhatsApp Status': '9:16',
+    'Instagram Image': '1:1',
+    'Facebook Image': '16:9'
+  };
 
-  return JSON.parse(response.text) as ExplanationResponse;
-};
+  const ornamentList = ornaments.length > 0 ? ornaments.join(", ") : "Minimal traditional jewelry";
 
-export const getTeacherSpeech = async (text: string): Promise<string> => {
-  const ai = getAI();
+  const prompt = `AUTHENTIC HAND-DRAWN MASTERPIECE. 
+  STYLE: High-end alcohol marker and fine-liner pen illustration on ${background}. 
+  TEXTURE: Visible traditional paper grain, ink bleed, and hand-sketched pen strokes. 
+  IMPORTANT: ABSOLUTELY NO digital CGI effects. It must look like a physical drawing made with markers and pens.
+  
+  CLOTHING COLOR MATCHING: Match the colors and design of the clothing from the source photo exactly. 
+  CRITICAL: DO NOT use black lines or black ink to define patterns on colorful clothes. For example, if the dress is pink, use darker pink or magenta tones for details/patterns, NOT black. Keep the colors vibrant and true to the original image.
+  
+  AESTHETICS: Use "Light and Happy" tones. The overall color palette should be vibrant, bright, and cheerful. Use dark colors ONLY if absolutely necessary for essential contrast.
+  
+  FACE & REALITY: The face must be LUMINOUS, GLOWING, and beautifully lit. REMOVE all harsh shadows from the face. The face should appear radiant and "damakta hua" (shining). Maintain 100% facial reality and likeness—the person must look like themselves, but professionally illustrated.
+  
+  ORNAMENTS: Render ${ornamentList} with elegant marker shading.
+  SEASON: ${season === 'None' ? 'Joyful sunny lighting' : season + ' atmosphere with vibrant marker strokes'}.
+  
+  STRICT NO SIGNATURE: Do not write any names, signatures, watermarks, or text overlays on the image. The drawing must be completely clean.`;
+
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-preview-tts",
-    contents: [{ parts: [{ text: `Read this aloud like a kind Indian school teacher teaching a class: ${text}` }] }],
-    config: {
-      responseModalities: [Modality.AUDIO],
-      speechConfig: {
-        voiceConfig: {
-          prebuiltVoiceConfig: { voiceName: 'Kore' }, 
-        },
-      },
+    model: 'gemini-3-pro-image-preview',
+    contents: {
+      parts: [ ...imageParts, { text: prompt } ]
     },
-  });
-
-  const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  if (!base64Audio) throw new Error("Could not generate teacher's voice.");
-  return base64Audio;
-};
-
-export const getTeacherDiagram = async (topic: string): Promise<string> => {
-  const ai = getAI();
-  const prompt = `A simple, colorful educational diagram for a 10-year-old student about "${topic}". 
-  Style: Hand-drawn classroom blackboard style with clear labels in English. 
-  Bright colors, friendly illustrations, easy to understand. No complex text.`;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: [{ parts: [{ text: prompt }] }],
     config: {
       imageConfig: {
-        aspectRatio: "4:3"
+        aspectRatio: formatMap[format] as any,
+        imageSize: "4K"
       }
     }
   });
 
-  let imageUrl = "";
-  for (const part of response.candidates[0].content.parts) {
-    if (part.inlineData) {
-      imageUrl = `data:image/png;base64,${part.inlineData.data}`;
-      break;
+  for (const candidate of response.candidates || []) {
+    for (const part of candidate.content.parts) {
+      if (part.inlineData) {
+        return {
+          data: `data:image/png;base64,${part.inlineData.data}`,
+          usage: response.usageMetadata
+        };
+      }
     }
   }
-
-  if (!imageUrl) throw new Error("Could not create diagram.");
-  return imageUrl;
+  throw new Error("Workshop failed.");
 };

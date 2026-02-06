@@ -1,7 +1,7 @@
 {
-  "name": "Class 5 Guru - Your AI School Teacher",
-  "description": "A friendly AI teacher for Class 5 students in India. Supports Math, Science, Hindi, English, and more. Upload your homework or textbook photos for a caring, step-by-step explanation in Hindi or English.",
   "requestFramePermissions": [
     "camera"
-  ]
+  ],
+  "name": "Digital Painter",
+  "description": "Professional AI Art Transformation Workshop"
 }
